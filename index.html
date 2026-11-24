@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Al Akhtari General Store</title>
+  <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+  <!-- Login -->
+  <div id="login" class="login">
+    <form id="loginForm" class="card login-card">
+      <h1>Al Akhtari General Store</h1>
+      <label>Username<input id="username" autocomplete="username" required></label>
+      <label>Password<input id="password" type="password" autocomplete="current-password" required></label>
+      <p id="loginMsg" class="error"></p>
+      <button class="btn primary wide" type="submit">Log in</button>
+    </form>
+  </div>
+
+  <!-- App -->
+  <div id="app" class="shell hidden">
+    <header class="topbar">
+      <span class="brand">Al Akhtari General Store</span>
+      <div class="who"><span id="who"></span><button id="logout" class="btn small" type="button">Log out</button></div>
+    </header>
+    <nav id="nav" class="nav"></nav>
+    <main id="view"></main>
+  </div>
+
+  <!-- Printable order -->
+  <div id="print"></div>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,40 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function profile() { return get(/databases/$(database)/documents/users/$(request.auth.uid)).data; }
+    function activeUser() {
+      return signedIn()
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && profile().get('active', false) == true
+        && (profile().get('blockedUntil', null) == null || profile().blockedUntil <= request.time);
+    }
+    function isAdmin()    { return activeUser() && profile().role == 'admin'; }
+    function isReviewer() { return activeUser() && (profile().role == 'reviewer' || profile().role == 'admin'); }
+
+    match /users/{uid} {
+      allow read: if signedIn() && (request.auth.uid == uid || isAdmin());
+      allow create, update, delete: if isAdmin();
+    }
+    match /products/{id} {
+      allow read: if activeUser();
+      allow write: if isAdmin();
+    }
+    match /productCosts/{id} {
+      allow read: if isReviewer();
+      allow write: if isAdmin();
+    }
+    match /orders/{soNo} {
+      allow read: if isReviewer() || (activeUser() && resource.data.createdBy == request.auth.uid);
+      allow create: if activeUser() && request.resource.data.createdBy == request.auth.uid;
+      allow update, delete: if false;
+    }
+    match /orderProfit/{soNo} {
+      allow read: if isReviewer();
+      allow write: if false;               // written only by the Cloud Function below
+    }
+    match /counters/{id} {
+      allow read, write: if activeUser();
+    }
+  }
+}
