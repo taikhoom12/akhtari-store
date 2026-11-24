@@ -1,10 +1,11 @@
 import { firebaseConfig } from "./firebase-config.js";
-import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.4/firebase-app.js";
-import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut } from "https://www.gstatic.com/firebasejs/10.12.4/firebase-auth.js";
-import { getFirestore, doc, getDoc, getDocs, setDoc, updateDoc, collection, query, where, runTransaction, serverTimestamp, writeBatch, Timestamp } from "https://www.gstatic.com/firebasejs/10.12.4/firebase-firestore.js";
+import { initializeApp, getApps } from "https://www.gstatic.com/firebasejs/10.12.4/firebase-app.js";
+import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut } from "https://www.gstatic.com/firebasejs/10.12.4/firebase-auth.js";
+import { getFirestore, doc, getDoc, getDocs, setDoc, updateDoc, deleteDoc, collection, query, where, runTransaction, serverTimestamp, writeBatch, Timestamp } from "https://www.gstatic.com/firebasejs/10.12.4/firebase-firestore.js";
 
-const auth = getAuth(initializeApp(firebaseConfig));
-const db = getFirestore();
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
 const EMAIL_DOMAIN = "akhtari.local";
 const WORKBOOK = [
   ["Pepsi", "Soft Drink", "345 ml", 100, 78], ["Pond's Face Wash", "Cosmetics", "Face wash", 520, 410],
@@ -30,6 +31,9 @@ let recordsCache = [];
 
 const isAdmin = () => me?.role === "admin";
 const isReviewer = () => me?.role === "reviewer" || me?.role === "admin";
+// Profit is worked out in the browser for Reviewer/Admin: (price on the order - current cost) x qty.
+const lineProfit = (l) => (l.unitPrice - (costs[l.productId] ?? 0)) * l.qty;
+const orderProfit = (o) => o.lines.reduce((s, l) => s + lineProfit(l), 0);
 
 const ROUTES = {
   order:     { label: "New Sales Order", show: () => true,         render: renderOrder },
@@ -257,15 +261,31 @@ async function loadRecords() {
 function showRecords() {
   const q = $("#rSearch").value.trim().toUpperCase();
   const rows = recordsCache.filter((o) => !q || o.soNo.includes(q));
+  const showP = isReviewer();
   $("#rList").innerHTML = rows.length
-    ? `<table><thead><tr><th>SO no.</th><th>Customer</th><th>By</th><th>Payment</th><th class="r">Total (PKR)</th><th></th></tr></thead><tbody>
-       ${rows.map((o) => `<tr><td>${esc(o.soNo)}</td><td>${esc(o.customerName) || "-"}</td><td>${esc(o.createdByInitial)}</td><td>${esc(o.payment)}</td><td class="r">${money(o.grandTotal)}</td><td><button class="btn small" data-so="${esc(o.soNo)}">View</button></td></tr>`).join("")}
+    ? `<table><thead><tr><th>SO no.</th><th>Customer</th><th>By</th><th>Payment</th><th class="r">Total (PKR)</th>${showP ? '<th class="r">Profit (PKR)</th>' : ""}<th></th></tr></thead><tbody>
+       ${rows.map((o) => `<tr><td>${esc(o.soNo)}</td><td>${esc(o.customerName) || "-"}</td><td>${esc(o.createdByInitial)}</td><td>${esc(o.payment)}</td><td class="r">${money(o.grandTotal)}</td>${showP ? `<td class="r">${money(orderProfit(o))}</td>` : ""}<td><button class="btn small" data-so="${esc(o.soNo)}">View</button></td></tr>`).join("")}
        </tbody></table>
-       <p class="muted">${rows.length} order(s). Total: PKR ${money(rows.reduce((s, o) => s + o.grandTotal, 0))}</p>`
+       <p class="muted">${rows.length} order(s). Total: PKR ${money(rows.reduce((s, o) => s + o.grandTotal, 0))}${showP ? ` | Profit: PKR ${money(rows.reduce((s, o) => s + orderProfit(o), 0))}` : ""}</p>`
     : `<p class="muted">No orders for this date.</p>`;
   $("#rList").onclick = (e) => {
     const so = e.target.dataset.so;
-    if (so) { const o = recordsCache.find((x) => x.soNo === so); $("#rDetail").innerHTML = orderDocHtml(o) + `<div class="actions"><button id="printSo" class="btn primary">Print SO</button></div>`; $("#printSo").onclick = () => printOrder(o); }
+    if (!so) return;
+    const o = recordsCache.find((x) => x.soNo === so);
+    const profitBox = showP ? `<h2 style="margin-top:14px">Profit details (only you can see this)</h2><div class="tablewrap"><table>
+      <thead><tr><th>Product</th><th class="r">Qty</th><th class="r">Price</th><th class="r">Cost</th><th class="r">Profit</th></tr></thead><tbody>
+      ${o.lines.map((l) => `<tr><td>${esc(l.name)} (${esc(l.pack)})</td><td class="r">${l.qty}</td><td class="r">${money(l.unitPrice)}</td><td class="r">${money(costs[l.productId] ?? 0)}</td><td class="r">${money(lineProfit(l))}</td></tr>`).join("")}
+      <tr class="grand"><td colspan="4">Total profit (PKR)</td><td class="r">${money(orderProfit(o))}</td></tr></tbody></table></div>` : "";
+    $("#rDetail").innerHTML = orderDocHtml(o) + profitBox +
+      `<div class="actions" style="margin-top:12px">${isAdmin() ? '<button id="delSo" class="btn danger">Delete order</button>' : ""}<button id="printSo" class="btn primary">Print SO</button></div>`;
+    $("#printSo").onclick = () => printOrder(o);
+    if (isAdmin()) $("#delSo").onclick = async () => {
+      if (!confirm(`Delete ${o.soNo}? This cannot be undone.`)) return;
+      try { await deleteDoc(doc(db, "orders", o.soNo)); }
+      catch (err) { return alert("Could not delete: " + err.message); }
+      $("#rDetail").innerHTML = `<p class="muted">${esc(o.soNo)} was deleted.</p>`;
+      await loadRecords();
+    };
   };
 }
 
@@ -275,24 +295,27 @@ async function renderDashboard() {
     <section class="card"><h2>Top-selling products (this month)</h2><div id="top"></div></section>`;
   const day = ymd(), month = day.slice(0, 7), year = day.slice(0, 4);
   const load = async (name, field, value) => (await getDocs(query(collection(db, name), where(field, "==", value)))).docs.map((d) => d.data());
-  const [dO, mO, yO, dP, mP, yP] = await Promise.all([
-    load("orders", "day", day), load("orders", "month", month), load("orders", "year", year),
-    load("orderProfit", "day", day), load("orderProfit", "month", month), load("orderProfit", "year", year),
-  ]);
+  await loadCosts();
+  const [dO, mO, yO] = await Promise.all([load("orders", "day", day), load("orders", "month", month), load("orders", "year", year)]);
   const sum = (rows, k) => rows.reduce((s, r) => s + (r[k] || 0), 0);
+  const profit = (rows) => rows.reduce((s, o) => s + orderProfit(o), 0);
   const stats = [
     ["Today's sales", `PKR ${money(sum(dO, "grandTotal"))}`], ["Orders today", dO.length],
-    ["Today's profit", `PKR ${money(sum(dP, "totalProfit"))}`],
-    ["Monthly sales", `PKR ${money(sum(mO, "grandTotal"))}`], ["Monthly profit", `PKR ${money(sum(mP, "totalProfit"))}`],
-    ["Yearly sales", `PKR ${money(sum(yO, "grandTotal"))}`], ["Yearly profit", `PKR ${money(sum(yP, "totalProfit"))}`],
+    ["Today's profit", `PKR ${money(profit(dO))}`],
+    ["Monthly sales", `PKR ${money(sum(mO, "grandTotal"))}`], ["Monthly profit", `PKR ${money(profit(mO))}`],
+    ["Yearly sales", `PKR ${money(sum(yO, "grandTotal"))}`], ["Yearly profit", `PKR ${money(profit(yO))}`],
   ];
   $("#cards").innerHTML = stats.map(([l, v]) => `<div class="stat"><span class="label">${l}</span><strong>${v}</strong></div>`).join("");
 
-  const qty = {};
-  mO.forEach((o) => o.lines.forEach((l) => { const k = `${l.name} (${l.pack})`; qty[k] = (qty[k] || 0) + l.qty; }));
-  const top = Object.entries(qty).sort((a, b) => b[1] - a[1]).slice(0, 5);
+  const agg = {};
+  mO.forEach((o) => o.lines.forEach((l) => {
+    const k = `${l.name} (${l.pack})`;
+    const a = (agg[k] ||= { qty: 0, profit: 0 });
+    a.qty += l.qty; a.profit += lineProfit(l);
+  }));
+  const top = Object.entries(agg).sort((a, b) => b[1].qty - a[1].qty).slice(0, 5);
   $("#top").innerHTML = top.length
-    ? `<table><thead><tr><th>Product</th><th class="r">Qty sold</th></tr></thead><tbody>${top.map(([k, v]) => `<tr><td>${esc(k)}</td><td class="r">${v}</td></tr>`).join("")}</tbody></table>`
+    ? `<table><thead><tr><th>Product</th><th class="r">Qty sold</th><th class="r">Profit (PKR)</th></tr></thead><tbody>${top.map(([k, v]) => `<tr><td>${esc(k)}</td><td class="r">${v.qty}</td><td class="r">${money(v.profit)}</td></tr>`).join("")}</tbody></table>`
     : `<p class="muted">No sales this month yet.</p>`;
 }
 
@@ -368,14 +391,34 @@ async function seedCatalogue() {
 // ---------- User Management (Admin only) ----------
 const userStatus = (u) => {
   const until = u.blockedUntil?.toDate();
-  if (u.active !== true) return "Removed";
   if (until && until > new Date()) return `Blocked until ${until.toLocaleDateString("en-GB")}`;
-  return "Active";
+  return u.active === true ? "Active" : "Disabled";
 };
 
-async function renderUsers() {
+// Creates the login and the staff profile in one go. A second, temporary Firebase
+// connection is used so the admin stays signed in while the new login is made.
+async function createStaff({ name, username, initial, role, password }) {
+  const email = `${username}@${EMAIL_DOMAIN}`;
+  const helper = getApps().find((a) => a.name === "helper") || initializeApp(firebaseConfig, "helper");
+  const auth2 = getAuth(helper);
+  let cred;
+  try {
+    cred = await createUserWithEmailAndPassword(auth2, email, password);
+  } catch (err) {
+    if (err.code === "auth/weak-password") throw new Error("Password must be at least 6 characters.");
+    if (err.code !== "auth/email-already-in-use") throw err;
+    // Username was used before (and later deleted). Reuse that login if the old password is typed.
+    try { cred = await signInWithEmailAndPassword(auth2, email, password); }
+    catch { throw new Error("This username was used before. Pick a different username, or type the password it had before."); }
+  }
+  const uid = cred.user.uid;
+  await signOut(auth2);
+  await setDoc(doc(db, "users", uid), { username, name, initial, role, active: true, blockedUntil: null });
+}
+
+async function renderUsers(note = "") {
   const users = (await getDocs(collection(db, "users"))).docs.map((d) => ({ uid: d.id, ...d.data() }))
-    .sort((a, b) => a.name.localeCompare(b.name));
+    .sort((a, b) => (a.name || "").localeCompare(b.name || ""));
   const rows = users.map((u) => `<tr>
       <td>${esc(u.name)}</td><td>${esc(u.username)}</td><td>${esc(u.initial)}</td>
       <td><select data-role="${esc(u.uid)}">${["entry", "reviewer", "admin"].map((r) => `<option value="${r}" ${u.role === r ? "selected" : ""}>${r}</option>`).join("")}</select></td>
@@ -383,49 +426,67 @@ async function renderUsers() {
       <td><input type="number" min="1" value="1" id="days-${esc(u.uid)}" style="width:70px;display:inline-block"> days
         <button class="btn small" data-block="${esc(u.uid)}">Block</button>
         <button class="btn small" data-unblock="${esc(u.uid)}">Unblock</button>
-        <button class="btn small danger" data-remove="${esc(u.uid)}">Remove</button></td></tr>`).join("");
+        <button class="btn small danger" data-remove="${esc(u.uid)}">Delete</button></td></tr>`).join("");
   $("#view").innerHTML = `
     <h1>User Management</h1>
-    <section class="card"><h2>Add staff member</h2>
-      <p class="muted">First create the login in Firebase Console > Authentication > Add user, using email username@${EMAIL_DOMAIN}. Then paste that user's UID here.</p>
+    <section class="card"><h2>Add a user</h2>
       <div class="addrow">
-        <label class="grow">User UID<input id="uUid"></label>
-        <label>Username (login)<input id="uName"></label>
-        <label>Full name<input id="uFull"></label>
-        <label>Initial<input id="uInit" maxlength="2"></label>
+        <label class="grow">Full name<input id="uFull"></label>
+        <label>Username (for login)<input id="uName" autocapitalize="none"></label>
+        <label>Password (6+ characters)<input id="uPass" type="text" autocomplete="off"></label>
         <label>Role<select id="uRole"><option value="entry">Entry</option><option value="reviewer">Reviewer</option><option value="admin">Admin</option></select></label>
-        <button id="addUser" class="btn primary">Save user</button>
-      </div></section>
+        <label>Initial (optional)<input id="uInit" maxlength="2"></label>
+        <button id="addUser" class="btn primary">Add user</button>
+      </div>
+      <p id="uMsg" class="error">${esc(note)}</p>
+    </section>
     <section class="card tablewrap" id="uList"><table>
       <thead><tr><th>Name</th><th>Username</th><th>Initial</th><th>Role</th><th>Status</th><th>Actions</th></tr></thead>
-      <tbody>${rows}</tbody></table></section>`;
+      <tbody>${rows}</tbody></table>
+      <p class="muted">Deleting a user stops their login straight away. Their past orders stay in Sales Records.</p></section>`;
+
+  const msg = (t) => ($("#uMsg").textContent = t);
 
   $("#addUser").onclick = async () => {
-    const uid = $("#uUid").value.trim(), username = $("#uName").value.trim().toLowerCase();
-    const name = $("#uFull").value.trim(), initial = $("#uInit").value.trim().toUpperCase();
-    if (!uid || !username || !name || !initial) return alert("Fill in UID, username, full name and initial.");
-    await setDoc(doc(db, "users", uid), { username, name, initial, role: $("#uRole").value, active: true, blockedUntil: null });
-    renderUsers();
+    const name = $("#uFull").value.trim();
+    const username = $("#uName").value.trim().toLowerCase();
+    const password = $("#uPass").value;
+    const initial = $("#uInit").value.trim().toUpperCase() || name.charAt(0).toUpperCase();
+    if (!name || !username || !password) return msg("Fill in full name, username and password.");
+    if (!/^[a-z0-9._-]+$/.test(username)) return msg("Username can only have letters, numbers, dot, dash or underscore (no spaces, no @).");
+    if (password.length < 6) return msg("Password must be at least 6 characters.");
+    if (users.some((u) => u.username === username)) return msg("That username is already in the list.");
+    $("#addUser").disabled = true; msg("Creating...");
+    try { await createStaff({ name, username, initial, role: $("#uRole").value, password }); }
+    catch (err) { $("#addUser").disabled = false; return msg(err.message); }
+    renderUsers(`Added ${name}. They log in with username "${username}" and the password you typed.`);
   };
+
   $("#uList").onchange = async (e) => {
     const uid = e.target.dataset.role;
     if (!uid) return;
-    await updateDoc(doc(db, "users", uid), { role: e.target.value });
+    if (uid === me.uid && e.target.value !== "admin") { alert("You cannot remove your own admin role."); return renderUsers(); }
+    try { await updateDoc(doc(db, "users", uid), { role: e.target.value }); }
+    catch (err) { alert("Could not change role: " + err.message); }
     renderUsers();
   };
+
   $("#uList").onclick = async (e) => {
     const t = e.target.dataset;
-    if (t.block) {
-      const days = Number($(`#days-${t.block}`).value);
-      if (!(days > 0)) return alert("Enter the number of days.");
-      await updateDoc(doc(db, "users", t.block), { blockedUntil: Timestamp.fromDate(new Date(Date.now() + days * 86400000)) });
-    } else if (t.unblock) {
-      await updateDoc(doc(db, "users", t.unblock), { blockedUntil: null });
-    } else if (t.remove) {
-      if (t.remove === me.uid) return alert("You cannot remove your own account.");
-      if (!confirm("Remove this user's access? Their past orders are kept.")) return;
-      await updateDoc(doc(db, "users", t.remove), { active: false });
-    } else return;
+    try {
+      if (t.block) {
+        if (t.block === me.uid) return alert("You cannot block yourself.");
+        const days = Number($(`#days-${t.block}`).value);
+        if (!(days > 0)) return alert("Enter the number of days.");
+        await updateDoc(doc(db, "users", t.block), { blockedUntil: Timestamp.fromDate(new Date(Date.now() + days * 86400000)) });
+      } else if (t.unblock) {
+        await updateDoc(doc(db, "users", t.unblock), { blockedUntil: null });
+      } else if (t.remove) {
+        if (t.remove === me.uid) return alert("You cannot delete your own account.");
+        if (!confirm("Delete this user? They will no longer be able to log in. Their past orders are kept.")) return;
+        await deleteDoc(doc(db, "users", t.remove));
+      } else return;
+    } catch (err) { return alert("That did not work: " + err.message); }
     renderUsers();
   };
 }
